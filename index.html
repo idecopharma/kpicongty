@@ -550,6 +550,16 @@ function buildIndicatorHtml(item) {
     return text;
 }
 
+// ========== HIỂN THỊ ĐIỂM KPI (cho phép text mô tả, vd: "1%/khách hàng lên đơn") ==========
+function formatKpiScore(val) {
+    const raw = (val === undefined || val === null) ? '' : String(val).trim();
+    if (raw === '') return '0%';
+    // Nếu là số thuần (vd: 10, 10.5) -> thêm dấu %
+    if (/^-?\d+(\.\d+)?$/.test(raw)) return raw + '%';
+    // Nếu là văn bản mô tả -> giữ nguyên, escape HTML
+    return raw.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // ========== RENDER BẢNG 2 (DỰA TRÊN CONFIG) ==========
 function renderTable2() {
     const tbody = document.getElementById('kpiTable2Body');
@@ -597,7 +607,7 @@ function renderTable2() {
                     </div>
                     <div style="font-size:0.78em; color:#6b7280; margin-top:4px; font-style:italic;">(Tự động tính từ SLKH)</div>
                 </td>
-                <td class="kpi2-score kpi-score-display">${item.kpiScore}%</td>
+                <td class="kpi2-score kpi-score-display">${formatKpiScore(item.kpiScore)}</td>
                 <td><input class="kpi2-evaluation score-input border rounded-md p-2" type="number" min="0" max="100" value="0"></td>
                 <td><textarea class="kpi2-report w-full border rounded-md p-2" rows="2">Em tự đánh giá</textarea></td>
             `;
@@ -619,7 +629,7 @@ function renderTable2() {
                 <td class="text-center">${index + 1}</td>
                 <td>${buildIndicatorHtml(item)}</td>
                 <td>${(item.target || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
-                <td class="kpi2-score kpi-score-display">${item.kpiScore}%</td>
+                <td class="kpi2-score kpi-score-display">${formatKpiScore(item.kpiScore)}</td>
                 <td><input class="kpi2-evaluation score-input border rounded-md p-2" type="number" min="0" max="100" value="0"></td>
                 <td><textarea class="kpi2-report w-full border rounded-md p-2" rows="2">Em tự đánh giá</textarea></td>
             `;
@@ -651,7 +661,7 @@ function renderTable3() {
             <td class="text-center">${index + 1}</td>
             <td>${buildIndicatorHtml(item)}</td>
             <td>${(item.target || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
-            <td class="kpi3-score kpi-score-display">${item.kpiScore}%</td>
+            <td class="kpi3-score kpi-score-display">${formatKpiScore(item.kpiScore)}</td>
             <td><input class="kpi3-evaluation score-input border rounded-md p-2" type="number" min="0" max="100" value="0"></td>
             <td><textarea class="kpi3-report w-full border rounded-md p-2" rows="2">Em tự đánh giá</textarea></td>
         `;
@@ -679,7 +689,7 @@ function renderTable4() {
             <td class="text-center">${index + 1}</td>
             <td>${buildIndicatorHtml(item)}</td>
             <td>${(item.target || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</td>
-            <td class="kpi4-score kpi-score-display">${item.kpiScore}%</td>
+            <td class="kpi4-score kpi-score-display">${formatKpiScore(item.kpiScore)}</td>
             <td><input class="kpi4-evaluation score-input border rounded-md p-2" type="number" min="0" max="100" value="0"></td>
             <td><textarea class="kpi4-report w-full border rounded-md p-2" rows="2">Em tự đánh giá</textarea></td>
         `;
@@ -1723,8 +1733,10 @@ function renderAdminItemForm(item, idx) {
                 
                 <div>
                     <label class="block text-xs font-semibold text-gray-600 mb-1">Điểm KPI (%):</label>
-                    <input type="number" class="admin-score w-full p-2 border rounded text-sm" 
-                           value="${item.kpiScore || 0}" min="0" max="100" placeholder="VD: 10">
+                    <input type="text" class="admin-score w-full p-2 border rounded text-sm" 
+                           value="${String(item.kpiScore ?? '').replace(/"/g, '&quot;')}" 
+                           placeholder="VD: 10  hoặc  1%/khách hàng lên đơn">
+                    <p class="text-[10px] text-gray-400 mt-1">Có thể nhập số (vd: 10) hoặc văn bản mô tả (vd: 1%/khách hàng lên đơn)</p>
                 </div>
                 
                 <div>
@@ -1780,7 +1792,9 @@ function bindAdminItemEvents(idx) {
         });
     }
     itemEl.querySelector('.admin-score').addEventListener('input', e => {
-        items[idx].kpiScore = parseFloat(e.target.value) || 0;
+        const v = e.target.value.trim();
+        // Nếu là số thuần -> lưu dạng số; nếu là văn bản mô tả -> lưu nguyên chuỗi
+        items[idx].kpiScore = /^-?\d+(\.\d+)?$/.test(v) ? (parseFloat(v) || 0) : v;
     });
     itemEl.querySelector('.admin-color').addEventListener('change', e => {
         items[idx].indicatorColor = e.target.value;
