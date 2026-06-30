@@ -315,6 +315,7 @@
         <!-- NÚT HÀNH ĐỘNG -->
         <div class="flex flex-wrap gap-4 justify-center md:justify-start">
             <button id="saveKpiBtn" class="action-button">Lưu lại</button>
+            <button id="saveAsKpiBtn" class="action-button" style="background:#059669;">📄 Lưu thành bản mới</button>
             <button id="exportPdfBtn" class="action-button secondary-button">Xuất file PDF</button>
             <button id="exportHtmlBtn" class="action-button secondary-button">Xuất file HTML</button>
             <button id="backToListBtn" class="action-button secondary-button">Quay lại Danh sách</button>
@@ -888,7 +889,7 @@ function updateRow6Targets() {
 }
 
 // ========== LƯU DỮ LIỆU KPI ==========
-function saveKpiData() {
+function saveKpiData(forceNewId = false) {
     const creatorName = document.getElementById('creatorName').value.trim();
     const department = document.getElementById('department').value.trim();
     const creationDate = document.getElementById('creationDate').value;
@@ -1003,7 +1004,7 @@ function saveKpiData() {
         configSnapshot: configSnapshot,
         year: new Date().getFullYear(),
         month: new Date().getMonth() + 1,
-        id: currentKpiId || generateId(),
+        id: forceNewId ? generateId() : (currentKpiId || generateId()),
         lastModified: new Date().toISOString()
     };
     
@@ -1017,8 +1018,11 @@ function saveKpiData() {
         } else {
             currentKpiId = sanitizedData.id;
             updateFormStatusBadge(); // Cập nhật badge: từ "tạo mới" → "đang chỉnh sửa"
+            const msg = forceNewId
+                ? '✅ Đã tạo BẢN MỚI thành công!\n\nBạn đang chỉnh sửa bản sao mới (bản gốc vẫn giữ nguyên).\n\nBấm OK để xem danh sách, hoặc Cancel để tiếp tục chỉnh sửa.'
+                : '✅ Đã lưu bảng KPI thành công!\n\nBấm OK để xem danh sách KPI đã lưu, hoặc Cancel để tiếp tục chỉnh sửa.';
             // Hỏi người dùng có muốn xem danh sách hay tiếp tục
-            if (confirm('✅ Đã lưu bảng KPI thành công!\n\nBấm OK để xem danh sách KPI đã lưu, hoặc Cancel để tiếp tục chỉnh sửa.')) {
+            if (confirm(msg)) {
                 hideForm();
                 openModal();
             }
@@ -1273,7 +1277,7 @@ exportPdfBtn.onclick = function() {
     }
     
     // Ẩn các nút không cần thiết
-    const buttonsToHide = ['exportPdfBtn', 'exportHtmlBtn', 'saveKpiBtn', 'backToListBtn', 'addRowBtn'];
+    const buttonsToHide = ['exportPdfBtn', 'exportHtmlBtn', 'saveKpiBtn', 'saveAsKpiBtn', 'backToListBtn', 'addRowBtn'];
     buttonsToHide.forEach(id => {
         const btn = document.getElementById(id);
         if (btn) btn.style.display = 'none';
@@ -1946,6 +1950,25 @@ window.addEventListener('click', function(event) {
 // ========== GÁN SỰ KIỆN ==========
 addRowBtn.onclick = () => addKpiRow();
 saveKpiBtn.onclick = () => saveKpiData();
+
+// ========== LƯU THÀNH BẢN MỚI (SAVE AS) ==========
+function saveAsNewKpi() {
+    const creatorName = document.getElementById('creatorName').value.trim();
+    if (!creatorName || !document.getElementById('department').value.trim() || !document.getElementById('creationDate').value) {
+        alert('Vui lòng nhập đầy đủ Tên người lập, Bộ phận và Ngày lập trước khi tạo bản mới.');
+        return;
+    }
+    const newName = prompt('Nhập TÊN NGƯỜI LẬP cho bản mới:', creatorName);
+    if (newName === null) return; // người dùng bấm Cancel
+    if (newName.trim()) {
+        document.getElementById('creatorName').value = newName.trim();
+    }
+    // forceNewId = true => tạo ID mới, không ghi đè bản gốc
+    saveKpiData(true);
+}
+
+const saveAsKpiBtn = document.getElementById('saveAsKpiBtn');
+if (saveAsKpiBtn) saveAsKpiBtn.onclick = () => saveAsNewKpi();
 backToListBtn.onclick = () => { hideForm(); openModal(); };
 addNewKpiFromModalBtn.onclick = () => { resetMainForm(); showForm(); closeModal(); };
 closeModalBtn.onclick = closeModal;
