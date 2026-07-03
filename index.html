@@ -351,7 +351,18 @@
                     <input type="month" id="bgdPeriodInput" class="border rounded-md p-2">
                 </div>
                 <button id="bgdLoadBtn" class="action-button" style="background:#7c3aed;">🔍 Xem KPI kỳ này</button>
-                <button id="bgdExportPptxBtn" class="action-button" style="background:#d97706; display:none;">📊 Xuất PPTX toàn kỳ (tất cả CBNV)</button>
+                <button id="bgdExportPptxBtn" class="action-button" style="background:#d97706; display:none;">📊 Xuất PPTX (0 CBNV đã chọn)</button>
+            </div>
+            <!-- BƯỚC 2: CHỌN NHÂN VIÊN TRONG KỲ -->
+            <div id="bgdEmployeePanel" class="mb-4 p-4 rounded-lg" style="background:#fffbeb; border:1px solid #fcd34d; display:none;">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+                    <label class="font-semibold text-gray-800">👥 Chọn nhân viên cần xem / xuất PPTX:</label>
+                    <div class="flex gap-2">
+                        <button id="bgdSelectAllBtn" class="text-xs px-3 py-1.5 rounded-md text-white font-semibold" style="background:#15803d;">✔ Chọn hết</button>
+                        <button id="bgdDeselectAllBtn" class="text-xs px-3 py-1.5 rounded-md text-white font-semibold" style="background:#6b7280;">✖ Bỏ chọn hết</button>
+                    </div>
+                </div>
+                <div id="bgdEmployeeFilter" class="flex flex-wrap gap-2 max-h-40 overflow-y-auto"></div>
             </div>
             <div id="bgdSummary" class="mb-4"></div>
             <div id="bgdList" class="space-y-3"></div>
@@ -1906,12 +1917,16 @@ document.getElementById('exportPptxBtn').onclick = async function() {
 // ========== CHẾ ĐỘ BAN GIÁM ĐỐC: DUYỆT KPI TOÀN CBNV THEO KỲ ==========
 // ========================================================================
 const bgdModal = document.getElementById('bgdModal');
-let BGD_RECORDS = []; // records của kỳ đang xem
+let BGD_PERIOD_ALL = [];              // toàn bộ records trong kỳ đang xem
+let BGD_SELECTED = new Set();         // id các CBNV đang được chọn
+let BGD_RECORDS = [];                 // records đã chọn (dùng cho bảng + xuất PPTX)
 
 function bgdGetPeriod(rec) {
-    // Ưu tiên year/month đã lưu; fallback parse từ creationDate (yyyy-mm-dd)
-    if (rec.year && rec.month) return `${rec.year}-${String(rec.month).padStart(2, '0')}`;
+    // KỲ = tháng/năm ghi trên "Ngày lập" của bảng KPI (creationDate)
+    // KHÔNG dùng year/month làm chính vì 2 trường đó là thời điểm BẤM LƯU
+    // (lưu trễ sang đầu tháng sau sẽ làm record rớt khỏi kỳ) — chỉ fallback khi thiếu.
     if (rec.creationDate && /^\d{4}-\d{2}/.test(rec.creationDate)) return rec.creationDate.substring(0, 7);
+    if (rec.year && rec.month) return `${rec.year}-${String(rec.month).padStart(2, '0')}`;
     return '';
 }
 
@@ -1921,6 +1936,7 @@ document.getElementById('openBgdReviewBtn').onclick = function() {
     document.getElementById('bgdPeriodInput').value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     document.getElementById('bgdSummary').innerHTML = '';
     document.getElementById('bgdList').innerHTML = '<p class="text-gray-500 text-center py-4">Chọn kỳ và bấm "Xem KPI kỳ này".</p>';
+    document.getElementById('bgdEmployeePanel').style.display = 'none';
     document.getElementById('bgdExportPptxBtn').style.display = 'none';
     bgdModal.style.display = 'block';
     bgdLoadPeriod(); // tự động tải luôn kỳ tháng trước
@@ -1928,96 +1944,177 @@ document.getElementById('openBgdReviewBtn').onclick = function() {
 document.getElementById('closeBgdModalBtn').onclick = () => { bgdModal.style.display = 'none'; };
 document.getElementById('bgdLoadBtn').onclick = () => bgdLoadPeriod();
 
+// ========== BƯỚC 1: TẢI TOÀN BỘ KPI CỦA KỲ ==========
 function bgdLoadPeriod() {
     const period = document.getElementById('bgdPeriodInput').value;
     if (!period) { alert('Vui lòng chọn kỳ tháng/năm!'); return; }
     const listDiv = document.getElementById('bgdList');
-    const sumDiv = document.getElementById('bgdSummary');
+    document.getElementById('bgdSummary').innerHTML = '';
+    document.getElementById('bgdEmployeePanel').style.display = 'none';
+    document.getElementById('bgdExportPptxBtn').style.display = 'none';
     listDiv.innerHTML = '<p class="text-gray-500 text-center py-4">⏳ Đang tải dữ liệu kỳ ' + period + '...</p>';
-    sumDiv.innerHTML = '';
 
     db.ref('kpiBoards_kd').once('value', snapshot => {
         const all = Object.values(snapshot.val() || {});
-        BGD_RECORDS = all.filter(r => bgdGetPeriod(r) === period)
-                         .sort((a, b) => (b.scores?.total || 0) - (a.scores?.total || 0));
+        BGD_PERIOD_ALL = all.filter(r => bgdGetPeriod(r) === period)
+                            .sort((a, b) => (b.scores?.total || 0) - (a.scores?.total || 0));
 
-        if (BGD_RECORDS.length === 0) {
-            listDiv.innerHTML = `<p class="text-gray-500 text-center py-6">Không có bảng KPI nào trong kỳ <b>${period}</b>.</p>`;
-            document.getElementById('bgdExportPptxBtn').style.display = 'none';
+        if (BGD_PERIOD_ALL.length === 0) {
+            // Gợi ý các kỳ đang có dữ liệu để BGĐ chọn nhanh
+            const counts = {};
+            all.forEach(r => { const p = bgdGetPeriod(r); if (p) counts[p] = (counts[p] || 0) + 1; });
+            const chips = Object.keys(counts).sort().reverse()
+                .map(p => `<button class="bgd-period-chip text-xs px-3 py-1.5 rounded-full font-semibold" style="background:#ede9fe; color:#5b21b6; border:1px solid #c4b5fd;" data-period="${p}">${p} (${counts[p]} bảng)</button>`)
+                .join(' ');
+            listDiv.innerHTML = `
+                <p class="text-gray-500 text-center py-4">Không có bảng KPI nào trong kỳ <b>${period}</b>.</p>
+                ${chips ? `<div class="text-center text-sm text-gray-600 mb-2">Các kỳ đang có dữ liệu — bấm để xem:</div><div class="flex flex-wrap justify-center gap-2">${chips}</div>` : ''}`;
+            listDiv.querySelectorAll('.bgd-period-chip').forEach(b => {
+                b.onclick = () => { document.getElementById('bgdPeriodInput').value = b.dataset.period; bgdLoadPeriod(); };
+            });
             return;
         }
-        document.getElementById('bgdExportPptxBtn').style.display = '';
 
-        // --- Thống kê nhanh ---
-        const total = BGD_RECORDS.length;
-        const avg = Math.round(BGD_RECORDS.reduce((s, r) => s + (r.scores?.total || 0), 0) / total);
-        const confirmed = BGD_RECORDS.filter(r => r.confirmedByManager).length;
-        const excellent = BGD_RECORDS.filter(r => (r.scores?.total || 0) >= 80).length;
-        sumDiv.innerHTML = `
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
-                <div class="p-3 rounded-lg" style="background:#eef2ff;"><div class="text-2xl font-bold text-indigo-700">${total}</div><div class="text-xs text-gray-600">Bảng KPI trong kỳ</div></div>
-                <div class="p-3 rounded-lg" style="background:#f0fdf4;"><div class="text-2xl font-bold text-green-700">${avg}</div><div class="text-xs text-gray-600">Điểm trung bình</div></div>
-                <div class="p-3 rounded-lg" style="background:#fefce8;"><div class="text-2xl font-bold text-yellow-700">${excellent}</div><div class="text-xs text-gray-600">Đạt ≥ 80 điểm</div></div>
-                <div class="p-3 rounded-lg" style="background:#fdf2f8;"><div class="text-2xl font-bold text-pink-700">${confirmed}/${total}</div><div class="text-xs text-gray-600">QL đã xác nhận</div></div>
-            </div>`;
-
-        // --- Bảng danh sách CBNV ---
-        let html = `
-            <div class="table-container rounded-lg border border-gray-200">
-            <table class="min-w-full text-sm">
-                <thead><tr style="background:#7c3aed; color:white;">
-                    <th class="text-center">#</th><th>Họ tên</th><th>Bộ phận</th>
-                    <th class="text-center">B1</th><th class="text-center">B2</th><th class="text-center">B3</th><th class="text-center">B4</th>
-                    <th class="text-center">Tổng</th><th class="text-center">Xác nhận</th><th class="text-center">Thao tác</th>
-                </tr></thead><tbody>`;
-        BGD_RECORDS.forEach((r, i) => {
-            const sc = r.scores || {};
-            const t = sc.total || 0;
-            const cls = t >= 80 ? 'text-green-600' : t >= 60 ? 'text-yellow-600' : 'text-red-600';
-            html += `<tr class="hover:bg-purple-50">
-                <td class="text-center">${i + 1}</td>
-                <td class="font-semibold text-indigo-700">${r.creatorName || ''}</td>
-                <td>${r.department || ''}</td>
-                <td class="text-center">${sc.table1?.evaluation ?? 0}</td>
-                <td class="text-center">${sc.table2?.evaluation ?? 0}</td>
-                <td class="text-center">${sc.table3?.evaluation ?? 0}</td>
-                <td class="text-center">${sc.table4?.evaluation ?? 0}</td>
-                <td class="text-center font-bold ${cls}">${t}</td>
-                <td class="text-center">${r.confirmedByManager ? '✅' : '⬜'}</td>
-                <td class="text-center whitespace-nowrap">
-                    <button class="bgd-open-btn text-xs px-2 py-1 rounded text-white" style="background:#4f46e5;" data-id="${r.id}">Mở xem</button>
-                    <button class="bgd-pptx-btn text-xs px-2 py-1 rounded text-white" style="background:#d97706;" data-id="${r.id}">PPTX</button>
-                </td></tr>`;
-        });
-        html += '</tbody></table></div>';
-        listDiv.innerHTML = html;
-
-        listDiv.querySelectorAll('.bgd-open-btn').forEach(btn => {
-            btn.onclick = () => { bgdModal.style.display = 'none'; kpiListModal.style.display = 'none'; loadKpiToForm(btn.dataset.id); };
-        });
-        listDiv.querySelectorAll('.bgd-pptx-btn').forEach(btn => {
-            btn.onclick = async () => {
-                const rec = BGD_RECORDS.find(r => r.id === btn.dataset.id);
-                if (!rec) return;
-                btn.disabled = true; btn.textContent = '⏳';
-                try {
-                    const pptx = pptxCreate();
-                    pptx.title = `KPI ${rec.creatorName} - ${period}`;
-                    pptxAddEmployeeSlides(pptx, rec, null);
-                    await pptxDownload(pptx, `KPI_${rec.creatorName}_${period}.pptx`);
-                } catch (e) { alert('❌ Lỗi: ' + e.message); }
-                btn.disabled = false; btn.textContent = 'PPTX';
-            };
-        });
+        // Mặc định: chọn hết toàn bộ CBNV trong kỳ
+        BGD_SELECTED = new Set(BGD_PERIOD_ALL.map(r => r.id));
+        bgdRenderEmployeeFilter();
+        bgdRenderSelected();
     });
 }
 
-// ========== XUẤT PPTX TOÀN KỲ (TẤT CẢ CBNV) CHO BAN GIÁM ĐỐC ==========
-document.getElementById('bgdExportPptxBtn').onclick = async function() {
-    if (!BGD_RECORDS.length) { alert('Chưa có dữ liệu kỳ này!'); return; }
+// ========== BƯỚC 2: KHUNG CHỌN NHÂN VIÊN (CHIP CHECKBOX) ==========
+function bgdRenderEmployeeFilter() {
+    const panel = document.getElementById('bgdEmployeePanel');
+    const filterDiv = document.getElementById('bgdEmployeeFilter');
+    panel.style.display = '';
+    filterDiv.innerHTML = '';
+
+    BGD_PERIOD_ALL.forEach(r => {
+        const checked = BGD_SELECTED.has(r.id);
+        const label = document.createElement('label');
+        label.className = 'bgd-emp-chip inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm cursor-pointer select-none border transition-colors';
+        label.style.cssText = checked
+            ? 'background:#ede9fe; border-color:#7c3aed; color:#5b21b6; font-weight:600;'
+            : 'background:#f9fafb; border-color:#d1d5db; color:#6b7280;';
+        label.innerHTML = `
+            <input type="checkbox" class="bgd-emp-cb h-4 w-4" data-id="${r.id}" ${checked ? 'checked' : ''} style="accent-color:#7c3aed;">
+            <span>${r.creatorName || '(chưa có tên)'}</span>
+            <span class="text-xs opacity-70">(${r.scores?.total ?? 0}đ)</span>`;
+        label.querySelector('.bgd-emp-cb').addEventListener('change', function() {
+            if (this.checked) BGD_SELECTED.add(this.dataset.id);
+            else BGD_SELECTED.delete(this.dataset.id);
+            bgdRenderEmployeeFilter(); // cập nhật style chip
+            bgdRenderSelected();
+        });
+        filterDiv.appendChild(label);
+    });
+}
+
+document.getElementById('bgdSelectAllBtn').onclick = function() {
+    BGD_SELECTED = new Set(BGD_PERIOD_ALL.map(r => r.id));
+    bgdRenderEmployeeFilter();
+    bgdRenderSelected();
+};
+document.getElementById('bgdDeselectAllBtn').onclick = function() {
+    BGD_SELECTED.clear();
+    bgdRenderEmployeeFilter();
+    bgdRenderSelected();
+};
+
+// ========== HIỂN THỊ THỐNG KÊ + BẢNG DANH SÁCH THEO CBNV ĐÃ CHỌN ==========
+function bgdRenderSelected() {
     const period = document.getElementById('bgdPeriodInput').value;
+    const listDiv = document.getElementById('bgdList');
+    const sumDiv = document.getElementById('bgdSummary');
+    const exportBtn = document.getElementById('bgdExportPptxBtn');
+
+    BGD_RECORDS = BGD_PERIOD_ALL.filter(r => BGD_SELECTED.has(r.id));
+
+    // Nút xuất: hiển thị số CBNV đã chọn
+    if (BGD_RECORDS.length > 0) {
+        exportBtn.style.display = '';
+        exportBtn.textContent = `📊 Xuất PPTX (${BGD_RECORDS.length}/${BGD_PERIOD_ALL.length} CBNV đã chọn)`;
+    } else {
+        exportBtn.style.display = 'none';
+    }
+
+    if (BGD_RECORDS.length === 0) {
+        sumDiv.innerHTML = '';
+        listDiv.innerHTML = '<p class="text-gray-500 text-center py-6">Chưa chọn nhân viên nào. Tick chọn từng người hoặc bấm "✔ Chọn hết".</p>';
+        return;
+    }
+
+    // --- Thống kê nhanh (theo nhóm đã chọn) ---
+    const total = BGD_RECORDS.length;
+    const avg = Math.round(BGD_RECORDS.reduce((s, r) => s + (r.scores?.total || 0), 0) / total);
+    const confirmed = BGD_RECORDS.filter(r => r.confirmedByManager).length;
+    const excellent = BGD_RECORDS.filter(r => (r.scores?.total || 0) >= 80).length;
+    sumDiv.innerHTML = `
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+            <div class="p-3 rounded-lg" style="background:#eef2ff;"><div class="text-2xl font-bold text-indigo-700">${total}</div><div class="text-xs text-gray-600">CBNV đã chọn</div></div>
+            <div class="p-3 rounded-lg" style="background:#f0fdf4;"><div class="text-2xl font-bold text-green-700">${avg}</div><div class="text-xs text-gray-600">Điểm trung bình</div></div>
+            <div class="p-3 rounded-lg" style="background:#fefce8;"><div class="text-2xl font-bold text-yellow-700">${excellent}</div><div class="text-xs text-gray-600">Đạt ≥ 80 điểm</div></div>
+            <div class="p-3 rounded-lg" style="background:#fdf2f8;"><div class="text-2xl font-bold text-pink-700">${confirmed}/${total}</div><div class="text-xs text-gray-600">QL đã xác nhận</div></div>
+        </div>`;
+
+    // --- Bảng danh sách CBNV đã chọn ---
+    let html = `
+        <div class="table-container rounded-lg border border-gray-200">
+        <table class="min-w-full text-sm">
+            <thead><tr style="background:#7c3aed; color:white;">
+                <th class="text-center">#</th><th>Họ tên</th><th>Bộ phận</th>
+                <th class="text-center">B1</th><th class="text-center">B2</th><th class="text-center">B3</th><th class="text-center">B4</th>
+                <th class="text-center">Tổng</th><th class="text-center">Xác nhận</th><th class="text-center">Thao tác</th>
+            </tr></thead><tbody>`;
+    BGD_RECORDS.forEach((r, i) => {
+        const sc = r.scores || {};
+        const t = sc.total || 0;
+        const cls = t >= 80 ? 'text-green-600' : t >= 60 ? 'text-yellow-600' : 'text-red-600';
+        html += `<tr class="hover:bg-purple-50">
+            <td class="text-center">${i + 1}</td>
+            <td class="font-semibold text-indigo-700">${r.creatorName || ''}</td>
+            <td>${r.department || ''}</td>
+            <td class="text-center">${sc.table1?.evaluation ?? 0}</td>
+            <td class="text-center">${sc.table2?.evaluation ?? 0}</td>
+            <td class="text-center">${sc.table3?.evaluation ?? 0}</td>
+            <td class="text-center">${sc.table4?.evaluation ?? 0}</td>
+            <td class="text-center font-bold ${cls}">${t}</td>
+            <td class="text-center">${r.confirmedByManager ? '✅' : '⬜'}</td>
+            <td class="text-center whitespace-nowrap">
+                <button class="bgd-open-btn text-xs px-2 py-1 rounded text-white" style="background:#4f46e5;" data-id="${r.id}">Mở xem</button>
+                <button class="bgd-pptx-btn text-xs px-2 py-1 rounded text-white" style="background:#d97706;" data-id="${r.id}">PPTX</button>
+            </td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    listDiv.innerHTML = html;
+
+    listDiv.querySelectorAll('.bgd-open-btn').forEach(btn => {
+        btn.onclick = () => { bgdModal.style.display = 'none'; kpiListModal.style.display = 'none'; loadKpiToForm(btn.dataset.id); };
+    });
+    listDiv.querySelectorAll('.bgd-pptx-btn').forEach(btn => {
+        btn.onclick = async () => {
+            const rec = BGD_RECORDS.find(r => r.id === btn.dataset.id);
+            if (!rec) return;
+            btn.disabled = true; btn.textContent = '⏳';
+            try {
+                const pptx = pptxCreate();
+                pptx.title = `KPI ${rec.creatorName} - ${period}`;
+                pptxAddEmployeeSlides(pptx, rec, null);
+                await pptxDownload(pptx, `KPI_${rec.creatorName}_${period}.pptx`);
+            } catch (e) { alert('❌ Lỗi: ' + e.message); }
+            btn.disabled = false; btn.textContent = 'PPTX';
+        };
+    });
+}
+
+// ========== XUẤT PPTX: TẤT CẢ CBNV ĐÃ CHỌN → 1 FILE, LẦN LƯỢT TỪNG NGƯỜI ==========
+document.getElementById('bgdExportPptxBtn').onclick = async function() {
+    if (!BGD_RECORDS.length) { alert('Chưa chọn nhân viên nào để xuất!'); return; }
+    const period = document.getElementById('bgdPeriodInput').value;
+    const isAll = BGD_RECORDS.length === BGD_PERIOD_ALL.length;
     const btn = this;
-    btn.disabled = true; btn.textContent = '⏳ Đang tạo PPTX toàn kỳ...';
+    const oldText = btn.textContent;
+    btn.disabled = true; btn.textContent = '⏳ Đang tạo PPTX...';
     try {
         const pptx = pptxCreate();
         pptx.title = `Tổng hợp KPI kỳ ${period} - IDECO`;
@@ -2026,11 +2123,12 @@ document.getElementById('bgdExportPptxBtn').onclick = async function() {
         pptx.addSection({ title: 'Tổng quan kỳ' });
         const cover = pptx.addSlide({ sectionTitle: 'Tổng quan kỳ' });
         cover.background = { color: '312E81' };
-        cover.addText('BÁO CÁO TỔNG HỢP KPI TOÀN CBNV', { x: 0.5, y: 2.3, w: 12.33, h: 0.9, align: 'center', fontFace: 'Arial', fontSize: 32, bold: true, color: 'FFFFFF' });
-        cover.addText(`Kỳ đánh giá: Tháng ${period.split('-')[1]}/${period.split('-')[0]}`, { x: 0.5, y: 3.3, w: 12.33, h: 0.6, align: 'center', fontFace: 'Arial', fontSize: 20, color: 'C7D2FE' });
+        cover.addText('BÁO CÁO TỔNG HỢP KPI CÁN BỘ NHÂN VIÊN', { x: 0.5, y: 2.1, w: 12.33, h: 0.9, align: 'center', fontFace: 'Arial', fontSize: 32, bold: true, color: 'FFFFFF' });
+        cover.addText(`Kỳ đánh giá: Tháng ${period.split('-')[1]}/${period.split('-')[0]}`, { x: 0.5, y: 3.1, w: 12.33, h: 0.6, align: 'center', fontFace: 'Arial', fontSize: 20, color: 'C7D2FE' });
+        cover.addText(isAll ? `Toàn bộ ${BGD_RECORDS.length} CBNV trong kỳ` : `${BGD_RECORDS.length}/${BGD_PERIOD_ALL.length} CBNV được chọn`, { x: 0.5, y: 3.8, w: 12.33, h: 0.5, align: 'center', fontFace: 'Arial', fontSize: 14, italic: true, color: 'A5B4FC' });
         cover.addText('CÔNG TY TNHH TM DV KẾT GIAO PHÁT TRIỂN QUỐC TẾ (IDECO)', { x: 0.5, y: 6.5, w: 12.33, h: 0.4, align: 'center', fontFace: 'Arial', fontSize: 12, color: '818CF8' });
 
-        // --- Slide bảng tổng hợp xếp hạng ---
+        // --- Slide bảng tổng hợp xếp hạng (chỉ CBNV đã chọn) ---
         const sumSlide = pptx.addSlide({ sectionTitle: 'Tổng quan kỳ' });
         sumSlide.addText(`BẢNG TỔNG HỢP ĐIỂM KPI — KỲ ${period}`, { x: 0.35, y: 0.25, w: 12.6, h: 0.5, fontFace: 'Arial', fontSize: 18, bold: true, color: '312E81' });
         const sumHeader = ['#', 'Họ tên', 'Bộ phận', 'B1', 'B2', 'B3', 'B4', 'Tổng điểm', 'QL xác nhận'].map(t => ({
@@ -2056,18 +2154,21 @@ document.getElementById('bgdExportPptxBtn').onclick = async function() {
             autoPage: true, autoPageRepeatHeader: true, autoPageSlideStartY: 0.6, newSlideStartY: 0.6, margin: 0.04
         });
 
-        // --- Chi tiết từng CBNV (mỗi người 1 section) ---
-        BGD_RECORDS.forEach(rec => {
-            const secTitle = `${rec.creatorName || 'CBNV'} (${rec.scores?.total || 0}đ)`;
+        // --- Chi tiết LẦN LƯỢT từng CBNV đã chọn (mỗi người 1 section) ---
+        BGD_RECORDS.forEach((rec, i) => {
+            const secTitle = `${i + 1}. ${rec.creatorName || 'CBNV'} (${rec.scores?.total || 0}đ)`;
             pptx.addSection({ title: secTitle });
             pptxAddEmployeeSlides(pptx, rec, secTitle);
         });
 
-        await pptxDownload(pptx, `KPI_TOAN_CBNV_Ky_${period}_IDECO.pptx`);
+        const fname = isAll
+            ? `KPI_TOAN_CBNV_Ky_${period}_IDECO.pptx`
+            : `KPI_${BGD_RECORDS.length}CBNV_Ky_${period}_IDECO.pptx`;
+        await pptxDownload(pptx, fname);
     } catch (e) {
-        alert('❌ Lỗi khi xuất PPTX toàn kỳ: ' + e.message);
+        alert('❌ Lỗi khi xuất PPTX: ' + e.message);
     } finally {
-        btn.disabled = false; btn.textContent = '📊 Xuất PPTX toàn kỳ (tất cả CBNV)';
+        btn.disabled = false; btn.textContent = oldText;
     }
 };
 
