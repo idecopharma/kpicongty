@@ -11,6 +11,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- PptxGenJS: Xuất file PowerPoint (CDN chính thức jsDelivr) -->
+    <script src="https://cdn.jsdelivr.net/gh/gitbrent/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
     <!-- QuillJS Editor -->
     <link href="https://cdn.quilljs.com/1.3.7/quill.snow.css" rel="stylesheet">
     <script src="https://cdn.quilljs.com/1.3.7/quill.js"></script>
@@ -318,6 +320,7 @@
             <button id="saveAsKpiBtn" class="action-button" style="background:#059669;">📄 Lưu thành bản mới</button>
             <button id="exportPdfBtn" class="action-button secondary-button">Xuất file PDF</button>
             <button id="exportHtmlBtn" class="action-button secondary-button">Xuất file HTML</button>
+            <button id="exportPptxBtn" class="action-button" style="background:#d97706;">📊 Xuất file PPTX</button>
             <button id="backToListBtn" class="action-button secondary-button">Quay lại Danh sách</button>
         </div>
     </div>
@@ -328,9 +331,30 @@
             <span class="float-right text-2xl cursor-pointer hover:text-gray-700" id="closeModalBtn">&times;</span>
             <h2 class="text-2xl font-semibold mb-6 text-gray-800">CHỈ TIÊU KPI TRONG THÁNG ĐƯỢC GIAO</h2>
             <button id="addNewKpiFromModalBtn" class="action-button mb-3 w-full">+ Thêm mới Bảng KPI</button>
+            <button id="openBgdReviewBtn" class="action-button mb-3 w-full" style="background:#7c3aed;">👔 Chế độ Ban Giám Đốc — Duyệt KPI theo kỳ</button>
             <a href="https://erp-ideco.skyit.vn/#/app/dashboard/main" target="_blank" class="secondary-button mb-6 w-full text-center block py-2 rounded-md">ERP HOME</a>
             <div class="text-sm text-gray-500 mb-3">Danh sách KPI đã lưu:</div>
             <div id="savedKpiList" class="space-y-3 max-h-96 overflow-y-auto p-2"></div>
+        </div>
+    </div>
+
+    <!-- MODAL BAN GIÁM ĐỐC: DUYỆT KPI TOÀN CBNV THEO KỲ -->
+    <div id="bgdModal" class="modal">
+        <div class="modal-content" style="max-width: 1150px; margin: 3% auto; max-height: 92vh; overflow-y: auto;">
+            <div class="flex justify-between items-center mb-4 sticky top-0 bg-white pb-2 border-b z-10">
+                <h2 class="text-2xl font-bold" style="color:#7c3aed;">👔 BAN GIÁM ĐỐC — TỔNG HỢP KPI THEO KỲ</h2>
+                <span class="text-2xl cursor-pointer hover:text-gray-700" id="closeBgdModalBtn">&times;</span>
+            </div>
+            <div class="flex flex-wrap items-end gap-3 mb-4 p-4 rounded-lg" style="background:#f5f3ff; border:1px solid #c4b5fd;">
+                <div>
+                    <label class="block text-sm font-semibold text-gray-700 mb-1">Chọn kỳ (tháng/năm):</label>
+                    <input type="month" id="bgdPeriodInput" class="border rounded-md p-2">
+                </div>
+                <button id="bgdLoadBtn" class="action-button" style="background:#7c3aed;">🔍 Xem KPI kỳ này</button>
+                <button id="bgdExportPptxBtn" class="action-button" style="background:#d97706; display:none;">📊 Xuất PPTX toàn kỳ (tất cả CBNV)</button>
+            </div>
+            <div id="bgdSummary" class="mb-4"></div>
+            <div id="bgdList" class="space-y-3"></div>
         </div>
     </div>
 
@@ -1587,6 +1611,470 @@ exportHtmlBtn.onclick = function() {
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
 };
+
+// ========================================================================
+// ========== XUẤT PPTX (PptxGenJS) + CHẾ ĐỘ BAN GIÁM ĐỐC THEO KỲ ==========
+// ========================================================================
+
+// --- Bảng màu cho 4 bảng KPI (đồng bộ giao diện web) ---
+const PPTX_TABLE_THEME = {
+    1: { fill: '374151', title: 'KPI NHIỆM VỤ CẤP QUẢN LÝ GIAO CỤ THỂ TRONG KỲ' },
+    2: { fill: '4338CA', title: 'CHỈ TIÊU KPI CHUYÊN MÔN' },
+    3: { fill: '15803D', title: 'CHỈ TIÊU KPI QUẢN LÝ CÔNG VIỆC' },
+    4: { fill: '1D4ED8', title: 'CHỈ TIÊU KPI NĂNG LỰC XỬ LÝ THÁCH THỨC (PHẦN VƯỢT)' }
+};
+
+// --- Chuyển HTML (Quill note / indicator) thành text thuần ---
+function pptxStripHtml(html) {
+    if (!html) return '';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = String(html)
+        .replace(/<li[^>]*>/gi, '\n• ')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n')
+        .replace(/<\/div>/gi, '\n');
+    return (tmp.textContent || tmp.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function pptxScoreColor(total) {
+    return total >= 80 ? '16A34A' : (total >= 60 ? 'D97706' : 'DC2626');
+}
+
+// --- Lấy config của 1 record (ưu tiên configSnapshot riêng) ---
+function pptxGetRecordConfig(rec, n) {
+    if (rec && rec.configSnapshot && rec.configSnapshot['table' + n]) return rec.configSnapshot['table' + n];
+    return DEFAULT_KPI_CONFIG['table' + n];
+}
+
+// --- Dựng dữ liệu dòng cho bảng 2/3/4 từ 1 record đã lưu ---
+function pptxRowsFromRecord(rec, n) {
+    const cfg = pptxGetRecordConfig(rec, n);
+    const items = (cfg && cfg.items) || [];
+    const dataArr = rec['kpi' + n + 'Data'] || [];
+    return items.map((item, idx) => {
+        let d = dataArr.find(x => x && x.itemId && item.id && x.itemId === item.id) || dataArr[idx] || {};
+        let target = item.target || '';
+        if (item.type === 'customer_count') {
+            const cnt = parseInt(d.customerCount) || item.customerCount || 0;
+            const pct = item.customerPercentage || 40;
+            const rev = item.revenuePerCustomer || 3500000;
+            const tc = Math.floor(cnt * pct / 100);
+            target = `SLKH: ${cnt} → Mục tiêu ${pct}%: ${tc} KH × ${(rev/1000000).toLocaleString('vi-VN')} triệu = ${(tc*rev).toLocaleString('vi-VN')} đ`;
+        }
+        return [
+            String(idx + 1),
+            pptxStripHtml(item.indicator || ''),
+            pptxStripHtml(target),
+            formatKpiScore(item.kpiScore),
+            String(d.evaluation !== undefined && d.evaluation !== null && d.evaluation !== '' ? d.evaluation : 0),
+            pptxStripHtml(d.report || '')
+        ];
+    });
+}
+
+// --- Thu thập dữ liệu form hiện tại thành 1 "record" (không lưu Firebase) ---
+function pptxCollectCurrentForm() {
+    const rec = {
+        creatorName: document.getElementById('creatorName').value.trim(),
+        department: document.getElementById('department').value.trim(),
+        creationDate: document.getElementById('creationDate').value,
+        employeeName: document.getElementById('employeeName').value.trim(),
+        employeeDate: document.getElementById('employeeDate').value,
+        managerName: document.getElementById('managerName').value.trim(),
+        managerPosition: document.getElementById('managerPosition').value.trim(),
+        managerDate: document.getElementById('managerDate').value,
+        managerComment: document.getElementById('managerComment').value.trim(),
+        strengths: document.getElementById('strengths').value.trim(),
+        improvements: document.getElementById('improvements').value.trim(),
+        recommendations: document.getElementById('recommendations').value.trim(),
+        confirmedByManager: document.getElementById('confirmedByManager').checked,
+        kpi2Note: kpi2NoteEditor ? kpi2NoteEditor.root.innerHTML : '',
+        kpi3Note: kpi3NoteEditor ? kpi3NoteEditor.root.innerHTML : '',
+        kpi4Note: kpi4NoteEditor ? kpi4NoteEditor.root.innerHTML : '',
+        configSnapshot: JSON.parse(JSON.stringify({
+            table2: CURRENT_CONFIG.table2, table3: CURRENT_CONFIG.table3, table4: CURRENT_CONFIG.table4
+        })),
+        kpiRows: [], kpi2Data: [], kpi3Data: [], kpi4Data: []
+    };
+    // Bảng 1 từ DOM
+    kpiTable1Body.querySelectorAll('tr').forEach(row => {
+        const ind = row.querySelector('.kpiIndicator');
+        if (ind && ind.value.trim()) {
+            rec.kpiRows.push({
+                kpiIndicator: ind.value.trim(),
+                achievedIndicator: row.querySelector('.achievedIndicator').value.trim(),
+                kpiScore: row.querySelector('.kpiScore').value,
+                scoreEvaluation: row.querySelector('.scoreEvaluation').value,
+                reportNotes: row.querySelector('.reportNotes').value.trim()
+            });
+        }
+    });
+    // Bảng 2/3/4 từ DOM
+    [2, 3, 4].forEach(n => {
+        document.querySelectorAll(`#kpiTable${n} tbody tr`).forEach(row => {
+            const cc = row.querySelector('.kpi2-customer-count');
+            rec['kpi' + n + 'Data'].push({
+                itemId: row.dataset.itemId || null,
+                evaluation: row.querySelector(`.kpi${n}-evaluation`).value,
+                report: row.querySelector(`.kpi${n}-report`).value,
+                customerCount: (n === 2 && cc) ? cc.value : null
+            });
+        });
+    });
+    rec.scores = calculateAllScores();
+    return rec;
+}
+
+// --- Thêm 1 bảng KPI dạng table vào PPTX (tự động sang trang khi dài) ---
+function pptxAddTableSlide(pptx, sectionTitle, rec, tableNo, rows, totalEval, note) {
+    const theme = PPTX_TABLE_THEME[tableNo];
+    const cfg = tableNo > 1 ? pptxGetRecordConfig(rec, tableNo) : null;
+    const title = (cfg && cfg.title) ? cfg.title : theme.title;
+    const slide = pptx.addSlide(sectionTitle ? { sectionTitle } : undefined);
+    slide.background = { color: 'FFFFFF' };
+    slide.addText(`BẢNG ${tableNo}: ${title}`, {
+        x: 0.35, y: 0.22, w: 11.0, h: 0.5, fontFace: 'Arial', fontSize: 17, bold: true, color: theme.fill
+    });
+    slide.addText([
+        { text: `${rec.creatorName || ''}`, options: { bold: true, color: '111827' } },
+        { text: `  •  ${rec.department || ''}  •  Kỳ: ${rec.creationDate || ''}`, options: { color: '6B7280' } }
+    ], { x: 0.35, y: 0.62, w: 9.0, h: 0.32, fontFace: 'Arial', fontSize: 11 });
+    slide.addText(`Tổng điểm bảng ${tableNo}: ${totalEval}`, {
+        x: 10.2, y: 0.18, w: 2.8, h: 0.75, align: 'center', valign: 'middle',
+        fontFace: 'Arial', fontSize: 16, bold: true, color: 'FFFFFF', fill: { color: theme.fill }, rectRadius: 0.08
+    });
+
+    const headerRow = ['STT', 'Chỉ số KPI', 'Đạt chỉ số', 'Điểm KPI %', 'Đánh giá (0-100)', 'Báo cáo'].map(t => ({
+        text: t, options: { bold: true, color: 'FFFFFF', fill: { color: theme.fill }, align: 'center', valign: 'middle', fontSize: 11 }
+    }));
+    const bodyRows = rows.map(r => ([
+        { text: r[0], options: { align: 'center' } },
+        { text: r[1], options: { bold: true, color: '1F2937' } },
+        { text: r[2] },
+        { text: r[3], options: { align: 'center', color: 'B91C1C', bold: true } },
+        { text: r[4], options: { align: 'center', bold: true, color: '047857' } },
+        { text: r[5], options: { color: '374151' } }
+    ]));
+    slide.addTable([headerRow, ...bodyRows], {
+        x: 0.35, y: 1.05, w: 12.6,
+        colW: [0.6, 4.1, 3.0, 1.1, 1.2, 2.6],
+        fontFace: 'Arial', fontSize: 10, color: '111827',
+        border: { type: 'solid', color: 'D1D5DB', pt: 0.75 },
+        valign: 'top', rowH: 0.35, margin: 0.04,
+        autoPage: true, autoPageRepeatHeader: true, autoPageCharWeight: -0.3,
+        autoPageSlideStartY: 0.6, newSlideStartY: 0.6
+    });
+
+    // Ghi chú "Phân tích báo cáo cuối kỳ" (nếu có) → slide riêng
+    const noteText = pptxStripHtml(note);
+    if (noteText) {
+        const ns = pptx.addSlide(sectionTitle ? { sectionTitle } : undefined);
+        ns.addText(`PHÂN TÍCH BÁO CÁO CUỐI KỲ — BẢNG ${tableNo}`, {
+            x: 0.35, y: 0.3, w: 12.6, h: 0.5, fontFace: 'Arial', fontSize: 16, bold: true, color: theme.fill
+        });
+        ns.addText(noteText, {
+            x: 0.35, y: 0.95, w: 12.6, h: 5.9, fontFace: 'Arial', fontSize: 12, color: '374151',
+            valign: 'top', fill: { color: 'F9FAFB' }, line: { color: 'E5E7EB', width: 1 }, shrinkText: true
+        });
+    }
+}
+
+// --- Dựng toàn bộ slide cho 1 CBNV (1 record) ---
+function pptxAddEmployeeSlides(pptx, rec, sectionTitle) {
+    const scores = rec.scores || { table1: {evaluation:0}, table2: {evaluation:0}, table3: {evaluation:0}, table4: {evaluation:0}, total: 0 };
+
+    // --- Slide tổng quan ---
+    const s = pptx.addSlide(sectionTitle ? { sectionTitle } : undefined);
+    s.background = { color: 'FFFFFF' };
+    s.addText('BẢNG ĐÁNH GIÁ KPI KINH DOANH — IDECO', {
+        x: 0.35, y: 0.35, w: 12.6, h: 0.6, align: 'center', fontFace: 'Arial', fontSize: 24, bold: true, color: '4338CA'
+    });
+    s.addText([
+        { text: rec.creatorName || '(chưa có tên)', options: { fontSize: 20, bold: true, color: '111827', breakLine: true } },
+        { text: `Bộ phận: ${rec.department || ''}    •    Kỳ đánh giá: ${rec.creationDate || ''}`, options: { fontSize: 13, color: '6B7280' } }
+    ], { x: 0.35, y: 1.05, w: 12.6, h: 0.9, align: 'center', fontFace: 'Arial' });
+
+    // 4 ô điểm + tổng
+    const boxes = [
+        { label: 'Bảng 1\nNhiệm vụ giao', val: scores.table1.evaluation, color: '374151' },
+        { label: 'Bảng 2\nChuyên môn', val: scores.table2.evaluation, color: '4338CA' },
+        { label: 'Bảng 3\nQuản lý CV', val: scores.table3.evaluation, color: '15803D' },
+        { label: 'Bảng 4\nPhần vượt', val: scores.table4.evaluation, color: '1D4ED8' }
+    ];
+    boxes.forEach((b, i) => {
+        const x = 0.55 + i * 2.35;
+        s.addText([
+            { text: String(b.val), options: { fontSize: 30, bold: true, color: 'FFFFFF', breakLine: true } },
+            { text: b.label, options: { fontSize: 10, color: 'FFFFFF' } }
+        ], { x, y: 2.2, w: 2.1, h: 1.6, align: 'center', valign: 'middle', fontFace: 'Arial', fill: { color: b.color } });
+    });
+    s.addText([
+        { text: String(scores.total), options: { fontSize: 44, bold: true, color: 'FFFFFF', breakLine: true } },
+        { text: 'TỔNG ĐIỂM ĐÁNH GIÁ', options: { fontSize: 11, bold: true, color: 'FFFFFF' } }
+    ], { x: 10.0, y: 2.2, w: 2.95, h: 1.6, align: 'center', valign: 'middle', fontFace: 'Arial', fill: { color: pptxScoreColor(scores.total) } });
+
+    // Xác nhận + nhận xét quản lý
+    const confirmTxt = rec.confirmedByManager ? '✔ Quản lý đã xác nhận' : '✖ Quản lý chưa xác nhận';
+    s.addText(confirmTxt, {
+        x: 0.55, y: 4.1, w: 4.0, h: 0.4, fontFace: 'Arial', fontSize: 12, bold: true,
+        color: rec.confirmedByManager ? '15803D' : 'DC2626'
+    });
+    const cmtParts = [];
+    if (rec.managerComment) cmtParts.push({ text: 'Nhận xét quản lý: ', options: { bold: true } }, { text: rec.managerComment + '\n' });
+    if (rec.strengths) cmtParts.push({ text: 'Điểm mạnh: ', options: { bold: true, color: '15803D' } }, { text: rec.strengths + '\n' });
+    if (rec.improvements) cmtParts.push({ text: 'Cần cải thiện: ', options: { bold: true, color: 'DC2626' } }, { text: rec.improvements + '\n' });
+    if (rec.recommendations) cmtParts.push({ text: 'Đề xuất kỳ tới: ', options: { bold: true, color: '1D4ED8' } }, { text: rec.recommendations });
+    if (cmtParts.length) {
+        s.addText(cmtParts, {
+            x: 0.55, y: 4.55, w: 12.2, h: 2.35, fontFace: 'Arial', fontSize: 11, color: '374151',
+            valign: 'top', fill: { color: 'F9FAFB' }, line: { color: 'E5E7EB', width: 1 }, shrinkText: true
+        });
+    }
+    s.addText(`NV xác nhận: ${rec.employeeName || '—'} (${rec.employeeDate || '—'})     |     Quản lý: ${rec.managerName || '—'} - ${rec.managerPosition || ''} (${rec.managerDate || '—'})`, {
+        x: 0.35, y: 7.05, w: 12.6, h: 0.32, align: 'center', fontFace: 'Arial', fontSize: 9.5, color: '9CA3AF'
+    });
+
+    // --- Bảng 1 ---
+    const t1rows = (rec.kpiRows || []).map((r, i) => [
+        String(i + 1), r.kpiIndicator || '', r.achievedIndicator || '',
+        formatKpiScore(r.kpiScore), String(r.scoreEvaluation || 0), r.reportNotes || ''
+    ]);
+    if (t1rows.length) pptxAddTableSlide(pptx, sectionTitle, rec, 1, t1rows, scores.table1.evaluation, '');
+
+    // --- Bảng 2/3/4 ---
+    [2, 3, 4].forEach(n => {
+        const rows = pptxRowsFromRecord(rec, n);
+        if (rows.length) pptxAddTableSlide(pptx, sectionTitle, rec, n, rows, scores['table' + n].evaluation, rec['kpi' + n + 'Note']);
+    });
+}
+
+// --- Khởi tạo pptx chuẩn 16:9 ---
+function pptxCreate() {
+    if (typeof PptxGenJS === 'undefined') {
+        throw new Error('Thư viện PptxGenJS chưa tải được. Vui lòng kiểm tra kết nối Internet rồi tải lại trang (Ctrl+F5).');
+    }
+    const pptx = new PptxGenJS();
+    pptx.defineLayout({ name: 'WIDE', width: 13.33, height: 7.5 });
+    pptx.layout = 'WIDE';
+    pptx.author = 'IDECO KPI System';
+    pptx.company = 'IDECO';
+    return pptx;
+}
+
+// --- Làm sạch tên file (bỏ ký tự Windows cấm) ---
+function pptxSafeFileName(name) {
+    return String(name).replace(/[\\/:*?"<>|]/g, '-').replace(/\s+/g, ' ').trim();
+}
+
+// --- Tải file PPTX qua Blob (ổn định trên cả file:// và web) ---
+async function pptxDownload(pptx, fileName) {
+    const blob = await pptx.write('blob');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = pptxSafeFileName(fileName);
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
+// ========== NÚT: XUẤT PPTX BẢNG KPI HIỆN TẠI ==========
+document.getElementById('exportPptxBtn').onclick = async function() {
+    const creatorName = document.getElementById('creatorName').value.trim();
+    const department = document.getElementById('department').value.trim();
+    const creationDate = document.getElementById('creationDate').value;
+    if (!creatorName || !department || !creationDate) {
+        alert('Vui lòng nhập đủ Tên người lập, Bộ phận và Ngày lập trước khi xuất PPTX!');
+        return;
+    }
+    const btn = this;
+    btn.disabled = true; btn.textContent = '⏳ Đang tạo PPTX...';
+    try {
+        const rec = pptxCollectCurrentForm();
+        const pptx = pptxCreate();
+        pptx.title = `KPI ${creatorName} - ${creationDate}`;
+        pptxAddEmployeeSlides(pptx, rec, null);
+        await pptxDownload(pptx, `KPI_${creatorName}_${department}_${creationDate}.pptx`);
+    } catch (e) {
+        alert('❌ Lỗi khi xuất PPTX: ' + e.message);
+    } finally {
+        btn.disabled = false; btn.textContent = '📊 Xuất file PPTX';
+    }
+};
+
+// ========================================================================
+// ========== CHẾ ĐỘ BAN GIÁM ĐỐC: DUYỆT KPI TOÀN CBNV THEO KỲ ==========
+// ========================================================================
+const bgdModal = document.getElementById('bgdModal');
+let BGD_RECORDS = []; // records của kỳ đang xem
+
+function bgdGetPeriod(rec) {
+    // Ưu tiên year/month đã lưu; fallback parse từ creationDate (yyyy-mm-dd)
+    if (rec.year && rec.month) return `${rec.year}-${String(rec.month).padStart(2, '0')}`;
+    if (rec.creationDate && /^\d{4}-\d{2}/.test(rec.creationDate)) return rec.creationDate.substring(0, 7);
+    return '';
+}
+
+document.getElementById('openBgdReviewBtn').onclick = function() {
+    // Mặc định: kỳ tháng trước
+    const d = new Date(); d.setMonth(d.getMonth() - 1);
+    document.getElementById('bgdPeriodInput').value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    document.getElementById('bgdSummary').innerHTML = '';
+    document.getElementById('bgdList').innerHTML = '<p class="text-gray-500 text-center py-4">Chọn kỳ và bấm "Xem KPI kỳ này".</p>';
+    document.getElementById('bgdExportPptxBtn').style.display = 'none';
+    bgdModal.style.display = 'block';
+    bgdLoadPeriod(); // tự động tải luôn kỳ tháng trước
+};
+document.getElementById('closeBgdModalBtn').onclick = () => { bgdModal.style.display = 'none'; };
+document.getElementById('bgdLoadBtn').onclick = () => bgdLoadPeriod();
+
+function bgdLoadPeriod() {
+    const period = document.getElementById('bgdPeriodInput').value;
+    if (!period) { alert('Vui lòng chọn kỳ tháng/năm!'); return; }
+    const listDiv = document.getElementById('bgdList');
+    const sumDiv = document.getElementById('bgdSummary');
+    listDiv.innerHTML = '<p class="text-gray-500 text-center py-4">⏳ Đang tải dữ liệu kỳ ' + period + '...</p>';
+    sumDiv.innerHTML = '';
+
+    db.ref('kpiBoards_kd').once('value', snapshot => {
+        const all = Object.values(snapshot.val() || {});
+        BGD_RECORDS = all.filter(r => bgdGetPeriod(r) === period)
+                         .sort((a, b) => (b.scores?.total || 0) - (a.scores?.total || 0));
+
+        if (BGD_RECORDS.length === 0) {
+            listDiv.innerHTML = `<p class="text-gray-500 text-center py-6">Không có bảng KPI nào trong kỳ <b>${period}</b>.</p>`;
+            document.getElementById('bgdExportPptxBtn').style.display = 'none';
+            return;
+        }
+        document.getElementById('bgdExportPptxBtn').style.display = '';
+
+        // --- Thống kê nhanh ---
+        const total = BGD_RECORDS.length;
+        const avg = Math.round(BGD_RECORDS.reduce((s, r) => s + (r.scores?.total || 0), 0) / total);
+        const confirmed = BGD_RECORDS.filter(r => r.confirmedByManager).length;
+        const excellent = BGD_RECORDS.filter(r => (r.scores?.total || 0) >= 80).length;
+        sumDiv.innerHTML = `
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+                <div class="p-3 rounded-lg" style="background:#eef2ff;"><div class="text-2xl font-bold text-indigo-700">${total}</div><div class="text-xs text-gray-600">Bảng KPI trong kỳ</div></div>
+                <div class="p-3 rounded-lg" style="background:#f0fdf4;"><div class="text-2xl font-bold text-green-700">${avg}</div><div class="text-xs text-gray-600">Điểm trung bình</div></div>
+                <div class="p-3 rounded-lg" style="background:#fefce8;"><div class="text-2xl font-bold text-yellow-700">${excellent}</div><div class="text-xs text-gray-600">Đạt ≥ 80 điểm</div></div>
+                <div class="p-3 rounded-lg" style="background:#fdf2f8;"><div class="text-2xl font-bold text-pink-700">${confirmed}/${total}</div><div class="text-xs text-gray-600">QL đã xác nhận</div></div>
+            </div>`;
+
+        // --- Bảng danh sách CBNV ---
+        let html = `
+            <div class="table-container rounded-lg border border-gray-200">
+            <table class="min-w-full text-sm">
+                <thead><tr style="background:#7c3aed; color:white;">
+                    <th class="text-center">#</th><th>Họ tên</th><th>Bộ phận</th>
+                    <th class="text-center">B1</th><th class="text-center">B2</th><th class="text-center">B3</th><th class="text-center">B4</th>
+                    <th class="text-center">Tổng</th><th class="text-center">Xác nhận</th><th class="text-center">Thao tác</th>
+                </tr></thead><tbody>`;
+        BGD_RECORDS.forEach((r, i) => {
+            const sc = r.scores || {};
+            const t = sc.total || 0;
+            const cls = t >= 80 ? 'text-green-600' : t >= 60 ? 'text-yellow-600' : 'text-red-600';
+            html += `<tr class="hover:bg-purple-50">
+                <td class="text-center">${i + 1}</td>
+                <td class="font-semibold text-indigo-700">${r.creatorName || ''}</td>
+                <td>${r.department || ''}</td>
+                <td class="text-center">${sc.table1?.evaluation ?? 0}</td>
+                <td class="text-center">${sc.table2?.evaluation ?? 0}</td>
+                <td class="text-center">${sc.table3?.evaluation ?? 0}</td>
+                <td class="text-center">${sc.table4?.evaluation ?? 0}</td>
+                <td class="text-center font-bold ${cls}">${t}</td>
+                <td class="text-center">${r.confirmedByManager ? '✅' : '⬜'}</td>
+                <td class="text-center whitespace-nowrap">
+                    <button class="bgd-open-btn text-xs px-2 py-1 rounded text-white" style="background:#4f46e5;" data-id="${r.id}">Mở xem</button>
+                    <button class="bgd-pptx-btn text-xs px-2 py-1 rounded text-white" style="background:#d97706;" data-id="${r.id}">PPTX</button>
+                </td></tr>`;
+        });
+        html += '</tbody></table></div>';
+        listDiv.innerHTML = html;
+
+        listDiv.querySelectorAll('.bgd-open-btn').forEach(btn => {
+            btn.onclick = () => { bgdModal.style.display = 'none'; kpiListModal.style.display = 'none'; loadKpiToForm(btn.dataset.id); };
+        });
+        listDiv.querySelectorAll('.bgd-pptx-btn').forEach(btn => {
+            btn.onclick = async () => {
+                const rec = BGD_RECORDS.find(r => r.id === btn.dataset.id);
+                if (!rec) return;
+                btn.disabled = true; btn.textContent = '⏳';
+                try {
+                    const pptx = pptxCreate();
+                    pptx.title = `KPI ${rec.creatorName} - ${period}`;
+                    pptxAddEmployeeSlides(pptx, rec, null);
+                    await pptxDownload(pptx, `KPI_${rec.creatorName}_${period}.pptx`);
+                } catch (e) { alert('❌ Lỗi: ' + e.message); }
+                btn.disabled = false; btn.textContent = 'PPTX';
+            };
+        });
+    });
+}
+
+// ========== XUẤT PPTX TOÀN KỲ (TẤT CẢ CBNV) CHO BAN GIÁM ĐỐC ==========
+document.getElementById('bgdExportPptxBtn').onclick = async function() {
+    if (!BGD_RECORDS.length) { alert('Chưa có dữ liệu kỳ này!'); return; }
+    const period = document.getElementById('bgdPeriodInput').value;
+    const btn = this;
+    btn.disabled = true; btn.textContent = '⏳ Đang tạo PPTX toàn kỳ...';
+    try {
+        const pptx = pptxCreate();
+        pptx.title = `Tổng hợp KPI kỳ ${period} - IDECO`;
+
+        // --- Slide bìa ---
+        pptx.addSection({ title: 'Tổng quan kỳ' });
+        const cover = pptx.addSlide({ sectionTitle: 'Tổng quan kỳ' });
+        cover.background = { color: '312E81' };
+        cover.addText('BÁO CÁO TỔNG HỢP KPI TOÀN CBNV', { x: 0.5, y: 2.3, w: 12.33, h: 0.9, align: 'center', fontFace: 'Arial', fontSize: 32, bold: true, color: 'FFFFFF' });
+        cover.addText(`Kỳ đánh giá: Tháng ${period.split('-')[1]}/${period.split('-')[0]}`, { x: 0.5, y: 3.3, w: 12.33, h: 0.6, align: 'center', fontFace: 'Arial', fontSize: 20, color: 'C7D2FE' });
+        cover.addText('CÔNG TY TNHH TM DV KẾT GIAO PHÁT TRIỂN QUỐC TẾ (IDECO)', { x: 0.5, y: 6.5, w: 12.33, h: 0.4, align: 'center', fontFace: 'Arial', fontSize: 12, color: '818CF8' });
+
+        // --- Slide bảng tổng hợp xếp hạng ---
+        const sumSlide = pptx.addSlide({ sectionTitle: 'Tổng quan kỳ' });
+        sumSlide.addText(`BẢNG TỔNG HỢP ĐIỂM KPI — KỲ ${period}`, { x: 0.35, y: 0.25, w: 12.6, h: 0.5, fontFace: 'Arial', fontSize: 18, bold: true, color: '312E81' });
+        const sumHeader = ['#', 'Họ tên', 'Bộ phận', 'B1', 'B2', 'B3', 'B4', 'Tổng điểm', 'QL xác nhận'].map(t => ({
+            text: t, options: { bold: true, color: 'FFFFFF', fill: { color: '4338CA' }, align: 'center', fontSize: 11 }
+        }));
+        const sumRows = BGD_RECORDS.map((r, i) => {
+            const sc = r.scores || {}; const t = sc.total || 0;
+            return [
+                { text: String(i + 1), options: { align: 'center' } },
+                { text: r.creatorName || '', options: { bold: true } },
+                { text: r.department || '' },
+                { text: String(sc.table1?.evaluation ?? 0), options: { align: 'center' } },
+                { text: String(sc.table2?.evaluation ?? 0), options: { align: 'center' } },
+                { text: String(sc.table3?.evaluation ?? 0), options: { align: 'center' } },
+                { text: String(sc.table4?.evaluation ?? 0), options: { align: 'center' } },
+                { text: String(t), options: { align: 'center', bold: true, color: pptxScoreColor(t) } },
+                { text: r.confirmedByManager ? 'Đã XN' : 'Chưa', options: { align: 'center', color: r.confirmedByManager ? '15803D' : 'DC2626' } }
+            ];
+        });
+        sumSlide.addTable([sumHeader, ...sumRows], {
+            x: 0.35, y: 0.9, w: 12.6, colW: [0.5, 3.0, 2.4, 0.9, 0.9, 0.9, 0.9, 1.5, 1.6],
+            fontFace: 'Arial', fontSize: 10.5, border: { type: 'solid', color: 'D1D5DB', pt: 0.75 },
+            autoPage: true, autoPageRepeatHeader: true, autoPageSlideStartY: 0.6, newSlideStartY: 0.6, margin: 0.04
+        });
+
+        // --- Chi tiết từng CBNV (mỗi người 1 section) ---
+        BGD_RECORDS.forEach(rec => {
+            const secTitle = `${rec.creatorName || 'CBNV'} (${rec.scores?.total || 0}đ)`;
+            pptx.addSection({ title: secTitle });
+            pptxAddEmployeeSlides(pptx, rec, secTitle);
+        });
+
+        await pptxDownload(pptx, `KPI_TOAN_CBNV_Ky_${period}_IDECO.pptx`);
+    } catch (e) {
+        alert('❌ Lỗi khi xuất PPTX toàn kỳ: ' + e.message);
+    } finally {
+        btn.disabled = false; btn.textContent = '📊 Xuất PPTX toàn kỳ (tất cả CBNV)';
+    }
+};
+
+// Đóng modal BGĐ khi click ra ngoài
+window.addEventListener('click', function(ev) {
+    if (ev.target === bgdModal) bgdModal.style.display = 'none';
+});
 
 // ========== THIẾT LẬP NỘI DUNG KPI CHO BẢNG KPI HIỆN TẠI (per-KPI config) ==========
 // Khác với template chung: cấu hình này CHỈ ÁP DỤNG cho bảng KPI hiện tại
